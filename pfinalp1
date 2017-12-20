@@ -1,0 +1,245 @@
+#!/usr/bin/python
+from subprocess import call
+from lxml import etree
+from sys import argv
+
+# --------------------------------------------------------------------------------------------------------------------
+#                                       Tools
+# --------------------------------------------------------------------------------------------------------------------
+
+mv = {"lb":"LAN1", "c1":"LAN1"}
+nw = {"lb":"10.0.1.1", "c1":"10.0.1.2"}
+
+# Crea los diccionarios de n maquinas virtuales
+def createDicts(n):
+    for i in range(n):
+        name = "s{0}".format(i+1)
+        mv[name] = "LAN2"
+
+        addr = "10.0.2.1{0}".format(i+1)
+        nw[name] = addr
+
+# Lee num-servidores y genera los diccionarios mv y nw
+def readToDicts():
+    with open("num-servidores", "r") as ns:
+        n = int(ns.read())
+    createDicts(n)
+
+# Escribe a num-servidores y genera los diccionarios
+def writeAndDicts(n):
+    with open("num-servidores", "w") as ns:
+        ns.write(str(n))
+    createDicts(n)
+# --------------------------------------------------------------------------------------------------------------------
+#                                       arrancar
+# --------------------------------------------------------------------------------------------------------------------
+
+# Arranca las maquinas virtuales
+def arrancar():
+    for m in mv:
+       comm = "sudo virsh define {0}.xml".format(m) 
+       call(comm.split())
+
+       comm = "sudo virsh start {0}".format(m) 
+       call(comm.split())
+
+       comm = "xterm -e 'sudo virsh console {0}' &".format(m) 
+       call(comm, shell=True)
+
+# --------------------------------------------------------------------------------------------------------------------
+#                                       create
+# --------------------------------------------------------------------------------------------------------------------
+
+# Crear los ficheros de diferencias para las maquinas virtuales
+def qcow2Files():
+    for m in mv:
+        comm = "qemu-img create -f qcow2 -b cdps-vm-base-p3.qcow2 {0}.qcow2".format(m)
+        c = comm.split()
+        call(c)
+
+# Crea los ficheros xml que serviran como plantilla para las mismas
+def xmlFiles():
+    for m in mv:
+        f = "{0}.xml".format(m)
+
+        tree = etree.parse("plantilla-vm-p3.xml")
+        root = tree.getroot()
+
+        name = root.find("name")
+        name.text = m
+
+        path = root.find("./devices/disk/source")
+        path.set("file", "/mnt/tmp/pf/{0}.qcow2".format(m))
+
+        bridge = root.find("./devices/interface/source")
+        bridge.set("bridge", mv[m])
+        if m == "lb":
+            nd = root.find("./devices")
+            iface = etree.SubElement(nd, "interface")
+            iface.set("type", "bridge")
+            src = etree.SubElement(iface, "source")
+            src.set("bridge", "LAN2")
+            mod = etree.SubElement(iface, "model")
+            mod.set("type", "virtio")
+
+        with open(f, "w") as fx:
+            fx.write(etree.tostring(root, pretty_print=True))
+
+# Crea las LANs a las que se conectaran las mv
+def createBridges():
+    call(["sudo", "brctl", "addbr", "LAN1"])
+    call(["sudo", "brctl", "addbr", "LAN2"])
+    call(["sudo", "ifconfig", "LAN1", "up"])
+    call(["sudo", "ifconfig", "LAN2", "up"])
+
+# Configura las maquinas virtuales
+def configMV():
+    call(["mkdir", "mnt"])
+    for m in mv:
+        comm = "sudo vnx_mount_rootfs -s -r {0}.qcow2 mnt".format(m)
+        call(comm.split())
+
+        comm = "echo {0} > mnt/etc/hostname".format(m)
+        call(comm, shell=True)
+
+        with open("mnt/etc/network/interfaces.d/interface.cfg", "w") as nwf:
+            nwf.write("auto eth0\n")
+            nwf.write("iface eth0 inet static\n")
+            nwf.write("address {0}\n".format(nw[m]))
+            nwf.write("netmask 255.255.255.0\n")
+            if m == "lb":
+                nwf.write("auto eth1\n")
+                nwf.write("iface eth1 inet static\n")
+                nwf.write("address 10.0.2.1\n")
+                nwf.write("netmask 255.255.255.0\n")
+                call("echo 'net.ipv4.ip_forward = 1' >> mnt/etc/sysctl.conf", shell=True)
+            elif m == "c1":
+                nwf.write("gateway 10.0.1.1\n")
+            else:
+                nwf.write("gateway 10.0.2.1\n")
+
+        call(["sudo", "vnx_mount_rootfs", "-u", "mnt"])
+    call(["sudo", "ifconfig", "LAN1", "10.0.1.3/24"])
+    call("sudo ip route add 10.0.0.0/16 via 10.0.1.1", shell=True)
+
+# Crea las los ficheros y la configuracion de red de las mv
+def crear(n):
+    writeAndDicts(n)
+    qcow2Files()
+    xmlFiles()
+    createBridges()
+    configMV()
+
+# --------------------------------------------------------------------------------------------------------------------
+#                                       destruir
+# --------------------------------------------------------------------------------------------------------------------
+
+# Destruye las maquinas virtuales
+def destruir():
+    readToDicts()
+
+    comm = "rm num-servidores"
+    call(comm.split())
+
+    comm = "rmdir mnt"
+    call(comm.split())
+
+    for m in mv:
+        comm = "sudo virsh destroy {0}".format(m)
+        call(comm.split())
+
+        comm = "sudo virsh undefine {0}".format(m)
+        call(comm.split())
+
+        comm = "yes 2>/dev/null | rm {0}.*".format(m)
+        call(comm, shell=True)
+
+# --------------------------------------------------------------------------------------------------------------------
+#                                       parar
+# --------------------------------------------------------------------------------------------------------------------
+
+# Para las maquinas virtuales
+def parar():
+    for m in mv:
+        comm = "sudo virsh shutdown {0}".format(m)
+        call(comm.split())
+
+
+# --------------------------------------------------------------------------------------------------------------------
+#                                       monitor
+# --------------------------------------------------------------------------------------------------------------------
+
+# Para las maquinas virtuales
+def monitor():
+    readToDicts()
+    for m in nw:
+        print("Maquina Virtual {0}".format(m))
+        print("\nEstado:")
+        comm = "sudo virsh domstate {0}".format(m)
+        call(comm.split())
+
+        print("\nInformacion:")
+        comm = "sudo virsh dominfo {0}".format(m)
+        call(comm.split())
+
+        comm = "sudo virsh cpu-stats {0} 2> /dev/null".format(m)
+        call(comm, shell=True)
+
+        print("\nNumero de pings de comprobacion exitosos. 10 enviados.")
+        comm = "ping -c 10 {0} | grep ttl | wc -l".format(nw[m])
+        call(comm, shell=True)
+        print("\n\n")
+
+# --------------------------------------------------------------------------------------------------------------------
+#                                       help
+# --------------------------------------------------------------------------------------------------------------------
+
+# Funcion de help
+def help():
+    print("""
+       Usage: pfinalp1 <orden> [ otros_parametros ]
+
+       Where: <orden> = { arrancar | crear | destruir | help | monitor | parar }
+       
+       otros_parametros:
+
+           crear    --> N number of vitrual servers to create. Default is 2
+           arrancar --> Name of vm to start. Default starts all.
+           parar    --> Name of vm to stop. Default stops all.
+        """)
+
+
+# --------------------------------------------------------------------------------------------------------------------
+#                                       main
+# --------------------------------------------------------------------------------------------------------------------
+
+if argv[1] == "arrancar":
+    readToDicts()
+    if len(argv) > 2 and argv[2] in mv:
+        mv = {argv[2]: ""}
+        arrancar()
+    else:
+        arrancar()
+elif argv[1] == "crear":
+    if len(argv) > 2 and 0 < int(argv[2]) and 5 >= int(argv[2]):
+        crear(int(argv[2]))
+    else:
+        crear(2)
+elif argv[1] == "destruir":
+    destruir()
+elif argv[1] == "help":
+    help()
+elif argv[1] == "monitor":
+    monitor()
+elif argv[1] == "parar":
+    readToDicts()
+    if len(argv) > 2 and argv[2] in mv:
+        mv = {argv[2]: ""}
+        parar()
+    else:
+        parar()
+else:
+    print("\nThere has been an error. For help check pfinalp1 help")
+    help()
+
+# --------------------------------------------------------------------------------------------------------------------
